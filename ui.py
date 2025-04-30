@@ -7,6 +7,7 @@ from pathlib import Path
 from langchain_openai import AzureChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
+import json
 
 # Load environment variables
 load_dotenv()
@@ -53,13 +54,28 @@ def get_llm():
 
 def create_tool_selection_prompt(tools):
     """Create a prompt for the LLM to select the appropriate tool."""
-    tool_descriptions = "\n".join([f"- {tool}" for tool in tools])
+    tool_descriptions = []
+    for tool in tools:
+        tool_info = f"- {tool.name}: {tool.description}\n"
+        if hasattr(tool, 'parameters'):
+            tool_info += "  Parameters:\n"
+            for param in tool.parameters:
+                tool_info += f"    - {param.name}: {param.description}\n"
+        tool_descriptions.append(tool_info)
+    
+    tool_descriptions_str = "\n".join(tool_descriptions)
+    
     return f"""You are an AI assistant that helps users with story-related tasks. Based on the user's request, select the most appropriate tool to use.
 
 Available tools:
-{tool_descriptions}
+{tool_descriptions_str}
 
 The user's request is: {{user_input}}
+
+Analyze the request and select the most appropriate tool. For each tool, consider:
+1. The tool's purpose
+2. The required parameters
+3. Whether the user's request matches the tool's capabilities
 
 Respond with the tool name and its arguments in JSON format. For example:
 {{
@@ -87,7 +103,9 @@ def main():
     # Display available tools
     st.sidebar.title("Available Tools")
     for tool in st.session_state.tools:
-        st.sidebar.write(f"🔧 {tool}")
+        st.sidebar.write(f"🔧 {tool.name}")
+        if hasattr(tool, 'description'):
+            st.sidebar.write(f"   {tool.description}")
     
     # Main chat interface
     st.write("### Chat")
@@ -111,7 +129,6 @@ def main():
             response = llm.invoke(prompt_template.format(user_input=prompt))
             
             # Parse the LLM response
-            import json
             try:
                 tool_selection = json.loads(response.content)
                 
