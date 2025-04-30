@@ -8,6 +8,7 @@ from langchain_openai import AzureChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
 import json
+from typing import Dict, Any
 
 # Load environment variables
 load_dotenv()
@@ -52,8 +53,8 @@ def get_llm():
         api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     )
 
-def create_tool_selection_prompt(tools):
-    """Create a prompt for the LLM to select the appropriate tool."""
+def create_tool_identification_prompt(tools):
+    """Create a prompt for the LLM to identify the appropriate tool."""
     tool_descriptions = []
     for tool in tools:
         tool_info = f"- {tool.name}: {tool.description}\n"
@@ -65,32 +66,55 @@ def create_tool_selection_prompt(tools):
     
     tool_descriptions_str = "\n".join(tool_descriptions)
     
-    return f"""You are an AI assistant that helps users with story-related tasks. Based on the user's request, select the most appropriate tool to use.
+    return f"""You are an AI assistant that helps users with story-related tasks. Based on the user's request, identify the most appropriate tool to use.
 
 Available tools:
 {tool_descriptions_str}
 
 The user's request is: {{user_input}}
 
-Analyze the request and select the most appropriate tool. For each tool, consider:
+Analyze the request and identify the most appropriate tool. Consider:
 1. The tool's purpose
 2. The required parameters
 3. Whether the user's request matches the tool's capabilities
 
-Respond with the tool name and its arguments in JSON format. For example:
+Respond with the tool name in JSON format. For example:
 {{
     "tool": "generate_and_save_story",
-    "arguments": {{
-        "prompt": "A story about a brave knight",
-        "file_path": "stories/knight.txt"
-    }}
+    "confidence": 0.9,
+    "reason": "The user wants to create a new story, which matches this tool's purpose"
 }}
 
 If no tool matches the request, respond with:
 {{
     "tool": null,
-    "message": "I couldn't find a suitable tool for your request. Please try rephrasing or ask for help with available tools."
+    "confidence": 0.0,
+    "reason": "No suitable tool found for this request"
 }}
+"""
+
+def create_parameter_formatting_prompt(tool, user_input: str) -> str:
+    """Create a prompt for the LLM to format parameters for the selected tool."""
+    tool_info = f"Tool: {tool.name}\nDescription: {tool.description}\n"
+    if hasattr(tool, 'parameters'):
+        tool_info += "Parameters:\n"
+        for param in tool.parameters:
+            tool_info += f"- {param.name}: {param.description}\n"
+    
+    return f"""You are an AI assistant that helps format parameters for tool calls. Based on the user's request and the selected tool, format the parameters appropriately.
+
+Tool Information:
+{tool_info}
+
+User's request: {user_input}
+
+Format the parameters in JSON format. For example, if the tool is generate_and_save_story and the user says "write a story about a dragon", you might respond with:
+{{
+    "prompt": "A story about a dragon",
+    "file_path": "stories/dragon.txt"
+}}
+
+Respond with only the JSON object containing the formatted parameters.
 """
 
 def main():
@@ -125,36 +149,38 @@ def main():
         # Process the prompt using LLM
         try:
             llm = get_llm()
-            prompt_template = create_tool_selection_prompt(st.session_state.tools)
-            response = llm.invoke(prompt_template.format(user_input=prompt))
             
-            # Parse the LLM response
-            try:
-                tool_selection = json.loads(response.content)
-                
-                if tool_selection["tool"] is None:
-                    # No suitable tool found
-                    st.session_state.messages.append({"role": "assistant", "content": tool_selection["message"]})
-                    with st.chat_message("assistant"):
-                        st.write(tool_selection["message"])
-                else:
-                    # Call the selected tool
-                    tool_response = asyncio.run(call_tool(
-                        tool_selection["tool"],
-                        **tool_selection["arguments"]
-                    ))
-                    
-                    # Add assistant response to chat history
-                    st.session_state.messages.append({"role": "assistant", "content": tool_response})
-                    with st.chat_message("assistant"):
-                        st.write(tool_response)
-                        
-            except json.JSONDecodeError:
-                error_msg = "I had trouble understanding your request. Please try rephrasing it."
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            # Step 1: Identify the appropriate tool
+            tool_identification_prompt = create_tool_identification_prompt(st.session_state.tools)
+            tool_selection = json.loads(llm.invoke(tool_identification_prompt.format(user_input=prompt)).content)
+            
+            if tool_selection["tool"] is None:
+                # No suitable tool found
+                st.session_state.messages.append({"role": "assistant", "content": tool_selection["reason"]})
                 with st.chat_message("assistant"):
-                    st.error(error_msg)
+                    st.write(tool_selection["reason"])
+            else:
+                # Step 2: Format parameters for the selected tool
+                selected_tool = next(tool for tool in st.session_state.tools if tool.name == tool_selection["tool"])
+                parameter_prompt = create_parameter_formatting_prompt(selected_tool, prompt)
+                formatted_parameters = json.loads(llm.invoke(parameter_prompt).content)
                 
+                # Step 3: Call the tool with formatted parameters
+                tool_response = asyncio.run(call_tool(
+                    tool_selection["tool"],
+                    **formatted_parameters
+                ))
+                
+                # Add assistant response to chat history
+                st.session_state.messages.append({"role": "assistant", "content": tool_response})
+                with st.chat_message("assistant"):
+                    st.write(tool_response)
+                
+        except json.JSONDecodeError:
+            error_msg = "I had trouble understanding your request. Please try rephrasing it."
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            with st.chat_message("assistant"):
+                st.error(error_msg)
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             st.session_state.messages.append({"role": "assistant", "content": error_msg})
