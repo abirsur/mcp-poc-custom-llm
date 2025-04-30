@@ -8,7 +8,7 @@ from langchain_openai import AzureChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # Load environment variables
 load_dotenv()
@@ -26,8 +26,15 @@ async def initialize_session():
         async with sse_client("http://localhost:8000/sse") as streams:
             async with ClientSession(streams[0], streams[1]) as session:
                 await session.initialize()
-                tools = await session.list_tools()
-                return tools.tools
+                tools_response = await session.list_tools()
+                # Ensure we have a list of tools
+                if hasattr(tools_response, 'tools'):
+                    return tools_response.tools
+                elif isinstance(tools_response, list):
+                    return tools_response
+                else:
+                    st.error("Unexpected tools response format")
+                    return []
     except Exception as e:
         st.error(f"Error connecting to server: {str(e)}")
         return []
@@ -53,15 +60,21 @@ def get_llm():
         api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     )
 
-def create_tool_identification_prompt(tools):
+def create_tool_identification_prompt(tools: List[Any]) -> str:
     """Create a prompt for the LLM to identify the appropriate tool."""
     tool_descriptions = []
     for tool in tools:
-        tool_info = f"- {tool.name}: {tool.description}\n"
+        # Handle different tool object structures
+        tool_name = getattr(tool, 'name', str(tool))
+        tool_desc = getattr(tool, 'description', 'No description available')
+        
+        tool_info = f"- {tool_name}: {tool_desc}\n"
         if hasattr(tool, 'parameters'):
             tool_info += "  Parameters:\n"
             for param in tool.parameters:
-                tool_info += f"    - {param.name}: {param.description}\n"
+                param_name = getattr(param, 'name', str(param))
+                param_desc = getattr(param, 'description', 'No description available')
+                tool_info += f"    - {param_name}: {param_desc}\n"
         tool_descriptions.append(tool_info)
     
     tool_descriptions_str = "\n".join(tool_descriptions)
@@ -93,13 +106,18 @@ If no tool matches the request, respond with:
 }}
 """
 
-def create_parameter_formatting_prompt(tool, user_input: str) -> str:
+def create_parameter_formatting_prompt(tool: Any, user_input: str) -> str:
     """Create a prompt for the LLM to format parameters for the selected tool."""
-    tool_info = f"Tool: {tool.name}\nDescription: {tool.description}\n"
+    tool_name = getattr(tool, 'name', str(tool))
+    tool_desc = getattr(tool, 'description', 'No description available')
+    
+    tool_info = f"Tool: {tool_name}\nDescription: {tool_desc}\n"
     if hasattr(tool, 'parameters'):
         tool_info += "Parameters:\n"
         for param in tool.parameters:
-            tool_info += f"- {param.name}: {param.description}\n"
+            param_name = getattr(param, 'name', str(param))
+            param_desc = getattr(param, 'description', 'No description available')
+            tool_info += f"- {param_name}: {param_desc}\n"
     
     return f"""You are an AI assistant that helps format parameters for tool calls. Based on the user's request and the selected tool, format the parameters appropriately.
 
@@ -123,13 +141,17 @@ def main():
     # Initialize tools if not already done
     if not st.session_state.tools:
         st.session_state.tools = asyncio.run(initialize_session())
+        if not st.session_state.tools:
+            st.error("Failed to initialize tools. Please check the server connection.")
+            return
     
     # Display available tools
     st.sidebar.title("Available Tools")
     for tool in st.session_state.tools:
-        st.sidebar.write(f"🔧 {tool.name}")
-        if hasattr(tool, 'description'):
-            st.sidebar.write(f"   {tool.description}")
+        tool_name = getattr(tool, 'name', str(tool))
+        tool_desc = getattr(tool, 'description', 'No description available')
+        st.sidebar.write(f"🔧 {tool_name}")
+        st.sidebar.write(f"   {tool_desc}")
     
     # Main chat interface
     st.write("### Chat")
@@ -161,7 +183,16 @@ def main():
                     st.write(tool_selection["reason"])
             else:
                 # Step 2: Format parameters for the selected tool
-                selected_tool = next(tool for tool in st.session_state.tools if tool.name == tool_selection["tool"])
+                selected_tool = next((tool for tool in st.session_state.tools 
+                                   if getattr(tool, 'name', str(tool)) == tool_selection["tool"]), None)
+                
+                if selected_tool is None:
+                    error_msg = f"Could not find tool: {tool_selection['tool']}"
+                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                    with st.chat_message("assistant"):
+                        st.error(error_msg)
+                    return
+                
                 parameter_prompt = create_parameter_formatting_prompt(selected_tool, prompt)
                 formatted_parameters = json.loads(llm.invoke(parameter_prompt).content)
                 
@@ -176,8 +207,8 @@ def main():
                 with st.chat_message("assistant"):
                     st.write(tool_response)
                 
-        except json.JSONDecodeError:
-            error_msg = "I had trouble understanding your request. Please try rephrasing it."
+        except json.JSONDecodeError as e:
+            error_msg = f"I had trouble understanding the response: {str(e)}"
             st.session_state.messages.append({"role": "assistant", "content": error_msg})
             with st.chat_message("assistant"):
                 st.error(error_msg)
