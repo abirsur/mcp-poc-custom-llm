@@ -106,8 +106,8 @@ def get_validation_chain() -> LLMChain:
 
     **Validation Criteria:**
     1.  **Web API Suitability:** The code must be a valid component of a .NET Core Web API (e.g., a Controller, a minimal API endpoint, a service, a model). It should not contain structures from unsupported project types like Console `Main` methods unless they are part of the Web API's `Program.cs`.
-    2.  **Valid Syntax:** The code must be syntactically correct C#.
-    3.  **Correct Structure & Conventions:** The code must adhere to standard {target_framework} Web API structure and best practices.
+    2.  **Valid Syntax & Structure:** The code must be syntactically correct and structurally sound. It should be "compilation-ready" from a code-quality perspective.
+    3.  **Ignore Missing References:** You MUST ignore errors related to missing package references (e.g., `using` statements for libraries that are not yet installed). Your validation should focus only on the quality and correctness of the code provided.
     4.  **Completeness:** The code must be a complete, valid file, not a partial snippet.
     5.  **No Placeholders:** The code must not contain placeholder comments like "// TODO" or "// Implement here".
 
