@@ -70,9 +70,10 @@ def get_conversion_chain() -> LLMChain:
 
     **Conversion Rules (Non-negotiable):**
     1.  **Web API Component MANDATORY:** The output code MUST be a valid Web API component. This means it must be a Controller, a Minimal API endpoint, a service class designed for dependency injection, a model, or part of the `Program.cs` setup for a Web API. **Generating any other type of code (e.g., a class with a `Main` method) is a failure.**
-    2.  **Convert Entry Points:** If the source code contains an application entry point (like a `Main` method or `Global.asax`), you MUST convert it into a suitable Web API structure. For example, a console application's logic should be refactored into one or more API endpoints in a Controller.
-    3.  **Modern Patterns:** You MUST use the latest C# and {target_framework} Web API patterns (e.g., Dependency Injection, async/await, `[ApiController]` attribute).
-    4.  **Code Only:** Your response MUST contain ONLY the raw C# code for the converted file. Do NOT include any explanations or markdown formatting.
+    2.  **One Class Per File:** Your response MUST contain exactly one C# class, interface, or struct definition. Do NOT include multiple classes or namespaces in a single file response.
+    3.  **Convert Entry Points:** If the source code contains an application entry point (like a `Main` method or `Global.asax`), you MUST convert it into a suitable Web API structure. For example, a console application's logic should be refactored into one or more API endpoints in a Controller.
+    4.  **Modern Patterns:** You MUST use the latest C# and {target_framework} Web API patterns (e.g., Dependency Injection, async/await, `[ApiController]` attribute).
+    5.  **Code Only:** Your response MUST contain ONLY the raw C# code for the converted file. Do NOT include any explanations or markdown formatting.
     5.  **File Path:** Based on the original file path (`{file_path}`), suggest a new path and filename appropriate for a standard {target_framework} Web API project. The path should be a comment on the first line, like this: `// New Path: Controllers/MyController.cs`
 
     **Original File Path:** {file_path}
@@ -144,7 +145,9 @@ def get_correction_chain() -> LLMChain:
     You are a senior .NET developer tasked with fixing code that has failed validation.
     Your **primary goal** is to rewrite the code to be a valid **{target_framework} Web API** component, correcting the specific errors provided.
 
-    **Target Architecture:** {target_framework} Web API. This is not optional.
+    **Correction Rules (Non-negotiable):**
+    1.  **Target Architecture:** The output MUST be a {target_framework} Web API component. This is not optional.
+    2.  **One Class Per File:** The corrected code MUST contain exactly one C# class, interface, or struct definition.
 
     **Validation Errors to Fix:**
     {error_feedback}
@@ -173,6 +176,60 @@ def get_correction_chain() -> LLMChain:
         template=prompt_template,
         input_variables=["failed_code", "error_feedback", "target_framework"]
     )
+    return LLMChain(llm=llm, prompt=prompt)
+
+
+def get_service_registration_chain() -> LLMChain:
+    """Initializes and returns the LLMChain for updating Program.cs."""
+    prompt_template = """
+    You are an expert .NET developer modifying a `Program.cs` file for a Web API. Your task is to add service registrations for the provided list of service classes.
+
+    **Instructions:**
+    -   Locate the service registration area (e.g., `var builder = WebApplication.CreateBuilder(args);`).
+    -   For each service in the list, add a new line `builder.Services.AddScoped<I{service_name}, {service_name}>();`.
+    -   If you cannot find a corresponding interface `I{service_name}`, register the concrete class directly: `builder.Services.AddScoped<{service_name}>();`.
+    -   Preserve all existing code. Only add the new service registrations.
+    -   Return only the complete, updated `Program.cs` file content.
+
+    **Service Classes to Register:**
+    {service_list}
+
+    **Original Program.cs:**
+    ```csharp
+    {file_content}
+    ```
+
+    **Updated Program.cs:**
+    """
+    llm = AzureChatOpenAI(azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"), api_key=os.getenv("AZURE_OPENAI_API_KEY"), azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), api_version=os.getenv("AZURE_OPENAI_API_VERSION"), temperature=0.0)
+    prompt = PromptTemplate(template=prompt_template, input_variables=["file_content", "service_list"])
+    return LLMChain(llm=llm, prompt=prompt)
+
+
+def get_startup_registration_chain() -> LLMChain:
+    """Initializes and returns the LLMChain for updating Startup.cs."""
+    prompt_template = """
+    You are an expert .NET developer modifying a `Startup.cs` file for a Web API. Your task is to add service registrations for the provided list of service classes.
+
+    **Instructions:**
+    -   Locate the `ConfigureServices(IServiceCollection services)` method.
+    -   For each service in the list, add a new line `services.AddScoped<I{service_name}, {service_name}>();`.
+    -   If you cannot find a corresponding interface `I{service_name}`, register the concrete class directly: `services.AddScoped<{service_name}>();`.
+    -   Preserve all existing code. Only add the new service registrations inside the `ConfigureServices` method.
+    -   Return only the complete, updated `Startup.cs` file content.
+
+    **Service Classes to Register:**
+    {service_list}
+
+    **Original Startup.cs:**
+    ```csharp
+    {file_content}
+    ```
+
+    **Updated Startup.cs:**
+    """
+    llm = AzureChatOpenAI(azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"), api_key=os.getenv("AZURE_OPENAI_API_KEY"), azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"), api_version=os.getenv("AZURE_OPENAI_API_VERSION"), temperature=0.0)
+    prompt = PromptTemplate(template=prompt_template, input_variables=["file_content", "service_list"])
     return LLMChain(llm=llm, prompt=prompt)
 
 
@@ -260,6 +317,8 @@ def process_file(
 
             # The corrected code overwrites the old file and the loop continues,
             # sending the new code back to Phase 2 for re-validation.
+            if os.path.exists(new_file_path):
+                os.remove(new_file_path)
             with open(new_file_path, "w", encoding="utf-8") as f:
                 f.write(corrected_code)
             logging.info(f"Corrected code saved. Returning to Phase 2 for re-validation.")
@@ -336,9 +395,67 @@ def convert_project(source_directory: str, target_directory: str, target_framewo
                 else:
                     logging.error(f"FAILURE: Failed to convert '{file_path}'. Last error: {result.error_message}")
 
-    logging.info("\n--- Conversion process completed. ---")
+    logging.info("\n--- File Conversion Phase Completed ---")
+
+    # === POST-PROCESSING: REGISTER SERVICES ===
+    try:
+        register_services_in_project(target_directory)
+    except Exception as e:
+        logging.error(f"An error occurred during service registration: {e}")
+
+    logging.info("\n--- Full Conversion Process Completed ---")
     logging.info(f"Final project available at: {target_directory}")
     logging.info("Review 'conversion_report.log' for a detailed summary of the process.")
+
+
+def register_services_in_project(project_path: str):
+    """
+    Scans the project for services and registers them in Program.cs or Startup.cs.
+    """
+    logging.info("\n--- Starting Service Registration Phase ---")
+    
+    program_cs_path = os.path.join(project_path, "Program.cs")
+    startup_cs_path = os.path.join(project_path, "Startup.cs")
+
+    use_program_cs = os.path.exists(program_cs_path)
+    use_startup_cs = os.path.exists(startup_cs_path)
+
+    if not use_program_cs and not use_startup_cs:
+        logging.warning("Could not find Program.cs or Startup.cs. Skipping service registration.")
+        return
+    
+    target_path = program_cs_path if use_program_cs else startup_cs_path
+    logging.info(f"Found configuration file: {os.path.basename(target_path)}")
+
+    services_to_register = []
+    for root, _, files in os.walk(project_path):
+        for file in files:
+            if file.endswith("Service.cs"):
+                class_name = os.path.splitext(file)[0]
+                services_to_register.append(class_name)
+
+    if not services_to_register:
+        logging.info("No new services found to register.")
+        return
+
+    logging.info(f"Found services to register: {services_to_register}")
+
+    with open(target_path, "r", encoding="utf-8") as f:
+        file_content = f.read()
+
+    if use_program_cs:
+        registration_chain = get_service_registration_chain()
+    else: # use_startup_cs
+        registration_chain = get_startup_registration_chain()
+
+    updated_content = registration_chain.run({
+        "file_content": file_content,
+        "service_list": "\n".join(services_to_register)
+    })
+
+    with open(target_path, "w", encoding="utf-8") as f:
+        f.write(updated_content)
+    logging.info(f"Successfully updated {os.path.basename(target_path)} with new service registrations.")
 
 
 if __name__ == "__main__":
