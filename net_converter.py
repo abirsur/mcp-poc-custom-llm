@@ -66,11 +66,11 @@ class CodeConversionResponse(BaseModel):
 def get_conversion_chain() -> LLMChain:
     """Initializes and returns the LLMChain for the initial code conversion."""
     prompt_template = """
-    You are an expert .NET developer specializing in framework migration. Your task is to convert the following C# code from {source_framework} to a **{target_framework} Web API**.
+    You are an expert .NET developer specializing in framework migration. Your **critical and only task** is to convert the following C# code from {source_framework} into a valid component for a **{target_framework} Web API**.
 
-    **Conversion Guidelines:**
-    1.  **Target Architecture:** The output MUST be suitable for a .NET Core Web API.
-    2.  **Entry Points:** If the source code contains an application entry point (like a `Main` method in a console app or `Global.asax` in older ASP.NET), you MUST convert it into a suitable Web API structure, such as a minimal API endpoint in `Program.cs` or a Controller class.
+    **Conversion Rules (Non-negotiable):**
+    1.  **Web API Component MANDATORY:** The output code MUST be a valid Web API component. This means it must be a Controller, a Minimal API endpoint, a service class designed for dependency injection, a model, or part of the `Program.cs` setup for a Web API. **Generating any other type of code (e.g., a class with a `Main` method) is a failure.**
+    2.  **Convert Entry Points:** If the source code contains an application entry point (like a `Main` method or `Global.asax`), you MUST convert it into a suitable Web API structure. For example, a console application's logic should be refactored into one or more API endpoints in a Controller.
     3.  **Modern Patterns:** You MUST use the latest C# and {target_framework} Web API patterns (e.g., Dependency Injection, async/await, `[ApiController]` attribute).
     4.  **Code Only:** Your response MUST contain ONLY the raw C# code for the converted file. Do NOT include any explanations or markdown formatting.
     5.  **File Path:** Based on the original file path (`{file_path}`), suggest a new path and filename appropriate for a standard {target_framework} Web API project. The path should be a comment on the first line, like this: `// New Path: Controllers/MyController.cs`
@@ -102,10 +102,10 @@ def get_validation_chain() -> LLMChain:
     parser = PydanticOutputParser(pydantic_object=CodeValidationResponse)
 
     prompt_template = """
-    You are a meticulous .NET code reviewer. Your task is to validate the following C# code intended for a **{target_framework} Web API**.
+    You are an extremely strict .NET code reviewer. Your task is to validate if the following C# code is a valid component for a **{target_framework} Web API**.
 
-    **Validation Criteria:**
-    1.  **Web API Suitability:** The code must be a valid component of a .NET Core Web API (e.g., a Controller, a minimal API endpoint, a service, a model). It should not contain structures from unsupported project types like Console `Main` methods unless they are part of the Web API's `Program.cs`.
+    **Validation Criteria (Must Pass All):**
+    1.  **CRITICAL: Web API Suitability:** The code's primary purpose MUST be to function within a .NET Core Web API. It must be a Controller, a minimal API endpoint, a service, a model, or Web API configuration. If it contains a `Main` method that is not part of the standard Web API `Program.cs` template, it is **invalid**. Any code that looks like it belongs in a Console App or a different project type is **invalid**.
     2.  **Valid Syntax & Structure:** The code must be syntactically correct and structurally sound. It should be "compilation-ready" from a code-quality perspective.
     3.  **Ignore Missing References:** You MUST ignore errors related to missing package references (e.g., `using` statements for libraries that are not yet installed). Your validation should focus only on the quality and correctness of the code provided.
     4.  **Completeness:** The code must be a complete, valid file, not a partial snippet.
@@ -142,9 +142,9 @@ def get_correction_chain() -> LLMChain:
     """Initializes and returns the LLMChain for correcting faulty code."""
     prompt_template = """
     You are a senior .NET developer tasked with fixing code that has failed validation.
-    Your task is to correct the provided C# code based on the given error feedback, ensuring it conforms to the **{target_framework} Web API** architecture.
+    Your **primary goal** is to rewrite the code to be a valid **{target_framework} Web API** component, correcting the specific errors provided.
 
-    **Target Architecture:** {target_framework} Web API
+    **Target Architecture:** {target_framework} Web API. This is not optional.
 
     **Validation Errors to Fix:**
     {error_feedback}
