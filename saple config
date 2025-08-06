@@ -1,0 +1,150 @@
+{
+  "groups": [
+    {
+      "group_name": "client",
+      "field_list": [
+        {
+          "field_name": "Insured_Name",
+          "priority": ["email", "acord", "broker"],
+          "operation": [
+            { "type": "fuzzy_match", "value": 0.75 },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": null
+        },
+        {
+          "field_name": "client_street",
+          "priority": ["email", "acord", "broker"],
+          "operation": [
+            { "type": "fuzzy_match", "value": 0.75 },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": { "depend_on_field": "Insured_Name" }
+        },
+        {
+          "field_name": "client_city",
+          "priority": ["email", "acord", "broker"],
+          "operation": [
+            { "type": "fuzzy_match", "value": 0.75 },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": { "depend_on_field": "client_street" }
+        },
+        {
+          "field_name": "client_state",
+          "priority": ["email", "acord", "broker"],
+          "operation": [
+            { "type": "fuzzy_match", "value": 0.75 },
+            { "type": "ComprehensiveMatch" },
+            {
+              "type": "llmEnrichment",
+              "query": "need full state name",
+              "support_field": "client_street"
+            }
+          ],
+          "dependency": { "depend_on_field": "Insured_Name" }
+        },
+        {
+          "field_name": "client_zip_code",
+          "priority": ["email", "acord", "broker"],
+          "operation": [
+            { "type": "fuzzy_match", "value": 0.85 },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": { "depend_on_field": "client_state" }
+        },
+        {
+          "field_name": "client_phone_number",
+          "priority": ["email", "acord"],
+          "operation": [
+            { "type": "regex_match", "pattern": "\\d{3}-\\d{3}-\\d{4}" },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": null
+        },
+        {
+          "field_name": "client_email",
+          "priority": ["email"],
+          "operation": [
+            { "type": "regex_match", "pattern": "^[\\w.-]+@[\\w.-]+\\.\\w{2,}$" },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": null
+        }
+      ]
+    },
+    {
+      "group_name": "broker",
+      "field_list": [
+        {
+          "field_name": "broker_Name",
+          "priority": ["email", "acord", "broker"],
+          "operation": [
+            { "type": "fuzzy_match", "value": 0.75 },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": null
+        },
+        {
+          "field_name": "broker_street",
+          "priority": ["email", "acord", "broker"],
+          "operation": [
+            { "type": "fuzzy_match", "value": 0.75 },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": { "depend_on_field": "broker_Name" }
+        },
+        {
+          "field_name": "broker_city",
+          "priority": ["email", "acord", "broker"],
+          "operation": [
+            { "type": "fuzzy_match", "value": 0.75 },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": { "depend_on_field": "broker_street" }
+        },
+        {
+          "field_name": "broker_state",
+          "priority": ["email", "acord", "broker"],
+          "operation": [
+            { "type": "fuzzy_match", "value": 0.75 },
+            { "type": "ComprehensiveMatch" },
+            {
+              "type": "llmEnrichment",
+              "query": "need full state name",
+              "support_field": "broker_street"
+            }
+          ],
+          "dependency": { "depend_on_field": "broker_Name" }
+        },
+        {
+          "field_name": "broker_zip_code",
+          "priority": ["email", "acord", "broker"],
+          "operation": [
+            { "type": "fuzzy_match", "value": 0.85 },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": { "depend_on_field": "broker_state" }
+        },
+        {
+          "field_name": "broker_phone_number",
+          "priority": ["email", "broker"],
+          "operation": [
+            { "type": "regex_match", "pattern": "\\d{3}-\\d{3}-\\d{4}" },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": null
+        },
+        {
+          "field_name": "broker_email",
+          "priority": ["email"],
+          "operation": [
+            { "type": "regex_match", "pattern": "^[\\w.-]+@[\\w.-]+\\.\\w{2,}$" },
+            { "type": "ComprehensiveMatch" }
+          ],
+          "dependency": null
+        }
+      ]
+    }
+  ]
+}
