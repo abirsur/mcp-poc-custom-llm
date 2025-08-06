@@ -43,6 +43,9 @@ def _parse_mcp_result(result: Any, default_message: str) -> str:
     return default_message
 
 
+from langchain.schema import LLMResult
+from langchain.schema.output import Generation
+
 class AzureOpenAILLM(BaseLLM):
     """LangChain LLM wrapper for Azure OpenAI"""
     
@@ -71,8 +74,6 @@ class AzureOpenAILLM(BaseLLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
-        """Call Azure OpenAI API synchronously"""
-        # For synchronous calls, we need to run the async method
         return asyncio.run(self._acall(prompt, stop, run_manager, **kwargs))
     
     async def _acall(
@@ -82,7 +83,6 @@ class AzureOpenAILLM(BaseLLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
-        """Call Azure OpenAI API asynchronously"""
         try:
             response = await self.azure_client.chat.completions.create(
                 model=self.model_name,
@@ -96,6 +96,20 @@ class AzureOpenAILLM(BaseLLM):
         except Exception as e:
             logger.error(f"Error calling Azure OpenAI: {e}")
             return f"Error: {str(e)}"
+
+    def _generate(
+        self,
+        prompts: List[str],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> LLMResult:
+        generations = []
+        for prompt in prompts:
+            output = self._call(prompt, stop=stop, run_manager=run_manager, **kwargs)
+            generations.append([Generation(text=output)])
+        return LLMResult(generations=generations)
+
 
 # Custom LangChain Tools for MCP Server Integration
 
@@ -569,3 +583,4 @@ if __name__ == "__main__":
     #     extracted_data_json = json.load(f)
     # asyncio.run(main(config_data, extracted_data_json))
     pass
+
