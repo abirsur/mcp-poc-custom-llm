@@ -145,6 +145,70 @@
           "dependency": null
         }
       ]
+
+
+
+--------------
+
+
+[
+  {
+    "doc_type": "email",
+    "source_id": "email_001",
+    "data": {
+      "Insured_Name": "John A. Smith",
+      "client_street": "123 Elm St.",
+      "client_city": "Springfield",
+      "client_state": "IL",
+      "client_zip_code": "62704",
+      "client_phone_number": "217-555-1234",
+      "client_email": "john.smith@example.com",
+      "broker_Name": "Jane Doe Insurance LLC",
+      "broker_street": "456 Oak Avenue",
+      "broker_city": "Lincoln",
+      "broker_state": "Illinois",
+      "broker_zip_code": "62656",
+      "broker_phone_number": "217-555-5678",
+      "broker_email": "jane.doe@brokeragency.com"
+    }
+  },
+  {
+    "doc_type": "acord",
+    "source_id": "acord_001",
+    "data": {
+      "Insured_Name": "John Smith",
+      "client_street": "123 Elm Street",
+      "client_city": "Springfield",
+      "client_state": "Illinois",
+      "client_zip_code": "62704",
+      "client_phone_number": "217-555-1234",
+      "broker_Name": "Jane D. Insurance",
+      "broker_street": "456 Oak Ave.",
+      "broker_city": "Lincoln",
+      "broker_state": "IL",
+      "broker_zip_code": "62656"
+    }
+  },
+  {
+    "doc_type": "broker",
+    "source_id": "broker_001",
+    "data": {
+      "Insured_Name": "J. A. Smith",
+      "client_street": "123 ELM ST",
+      "client_city": "Springfield",
+      "client_state": "Illinois",
+      "client_zip_code": "62704",
+      "broker_Name": "Jane Doe Ins. LLC",
+      "broker_street": "456 Oak Ave",
+      "broker_city": "Lincoln",
+      "broker_state": "IL",
+      "broker_zip_code": "62656",
+      "broker_phone_number": "217-555-5678",
+      "broker_email": "jdoe@insllc.com"
+    }
+  }
+]
+
     }
   ]
 }
