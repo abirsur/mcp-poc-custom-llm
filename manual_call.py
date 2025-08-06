@@ -615,7 +615,9 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 
-----
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+______________________________________________________________________________________________________________________________________________________________________________________________________________
 #!/usr/bin/env python3
 """
 Simplified MCP Client for Data Post-Processing based on configuration.
@@ -664,23 +666,13 @@ def _safe_parse_json(text: str, default: Dict = None) -> Dict:
 
 class SimpleDataProcessingClient:
     """
-    A simplified client that processes data by calling MCP tools as defined in a configuration file.
-    It follows the instructions in the config to call the matched MCP tools and gets the field-wise output.
+    A client that processes data by calling specific MCP tool methods based on a configuration file.
     """
 
     def __init__(self):
         self.mcp_session = None
         self.mcp_client = None
         self._session_initialized = False
-
-        self.operation_to_tool_map = {
-            "fuzzy_match": "fuzzy_match_sources",
-            "comprehensivematch": "identify_comprehensive_values",
-            "llmenrichment": "enrich_data_llm",
-            "regex_match": "extract_patterns",
-            "validation": "validate_field_data",
-            "normalization": "normalize_data",
-        }
 
     async def initialize(self, server_url: str = "http://127.0.0.1:8080"):
         """Initialize the client with the MCP server."""
@@ -709,48 +701,122 @@ class SimpleDataProcessingClient:
             self.mcp_session = None
             self.mcp_client = None
 
-    async def call_mcp_tool(self, tool_name: str, parameters: Dict) -> str:
-        """Wrapper for MCP tool calls."""
+    async def _call_mcp_tool(self, tool_name: str, parameters: Dict) -> str:
+        """Generic wrapper for MCP tool calls."""
         if not self._session_initialized:
             raise RuntimeError("Client not initialized. Call initialize() first.")
         try:
-            logger.info(f"Calling tool '{tool_name}' with params: {json.dumps(parameters, indent=2)}")
+            log_params = parameters.copy()
+            if 'sources' in log_params:
+                log_params['sources'] = f"[{len(log_params['sources'])} sources]"
+            if 'raw_data' in log_params:
+                log_params['raw_data'] = "[raw_data object]"
+            if 'data' in log_params:
+                log_params['data'] = "[data object]"
+            logger.info(f"Calling tool '{tool_name}' with params: {json.dumps(log_params, indent=2)}")
             result = await self.mcp_session.call_tool(tool_name, parameters)
             return _parse_mcp_result(result, f"No result from {tool_name}")
         except Exception as e:
             logger.error(f"Error calling {tool_name}: {e}")
             return json.dumps({"error": f"Error in {tool_name}: {str(e)}"})
 
-    def _prepare_tool_params(self, tool_name: str, field_name: str, data_sources: List[Dict], operation: Dict, field_config: Dict) -> Dict:
-        """Prepare parameters for the MCP tool call based on the operation."""
+    # --- Tool-Specific Calling Methods ---
+
+    async def fuzzy_match_sources(self, field_name: str, sources: List[Dict], priority_list: List[str], threshold: float, target_value: str) -> Dict:
+        """Calls the fuzzy_match_sources tool on the MCP server."""
         params = {
             "field_name": field_name,
-            "sources": data_sources,
-            "priority_list": field_config.get("priority", [])
+            "sources": sources,
+            "priority_list": priority_list,
+            "threshold": threshold,
+            "target_value": target_value
         }
+        result_str = await self._call_mcp_tool("fuzzy_match_sources", params)
+        return _safe_parse_json(result_str)
 
-        # Add operation-specific parameters
-        params.update(operation)
+    async def identify_comprehensive_values(self, field_name: str, sources: List[Dict], priority_list: List[str]) -> Dict:
+        """Calls the identify_comprehensive_values tool on the MCP server."""
+        params = {
+            "field_name": field_name,
+            "sources": sources,
+            "priority_list": priority_list
+        }
+        result_str = await self._call_mcp_tool("identify_comprehensive_values", params)
+        return _safe_parse_json(result_str)
 
-        # Rename 'value' from config to 'threshold' for fuzzy_match
-        if tool_name == "fuzzy_match_sources" and "value" in params:
-            params["threshold"] = params.pop("value")
+    async def enrich_data_llm(self, field_name: str, sources: List[Dict], priority_list: List[str], enrichment_prompt: str, context: Dict) -> Dict:
+        """Calls the enrich_data_llm tool on the MCP server."""
+        params = {
+            "field_name": field_name,
+            "sources": sources,
+            "priority_list": priority_list,
+            "enrichment_prompt": enrichment_prompt,
+            "context": context
+        }
+        result_str = await self._call_mcp_tool("enrich_data_llm", params)
+        return _safe_parse_json(result_str)
 
-        if tool_name == "enrich_data_llm":
-            params["enrichment_prompt"] = params.pop("query", f"Enrich data for field {field_name}")
-            params["context"] = {"support_field": params.pop("support_field", None)}
+    async def select_best_match(self, matches: List[Dict], priority_list: List[str] = None) -> Dict:
+        """Calls the select_best_match tool on the MCP server."""
+        params = {"matches": matches}
+        if priority_list:
+            params["priority_list"] = priority_list
+        result_str = await self._call_mcp_tool("select_best_match", params)
+        return _safe_parse_json(result_str)
 
-        return params
+    async def process_with_priority(self, sources: List[Dict], priority_list: List[str], fields: List[str]) -> Dict:
+        """Calls the process_with_priority tool on the MCP server."""
+        params = {
+            "sources": sources,
+            "priority_list": priority_list,
+            "fields": fields
+        }
+        result_str = await self._call_mcp_tool("process_with_priority", params)
+        return _safe_parse_json(result_str)
 
-    async def process_data_from_config(self, config: Dict, data_sources: List[Dict]) -> Dict:
+    async def set_field_dependencies(self, field_name: str, dependencies: List[str]) -> Dict:
+        """Calls the set_field_dependencies tool on the MCP server."""
+        params = {
+            "field_name": field_name,
+            "dependencies": dependencies
+        }
+        result_str = await self._call_mcp_tool("set_field_dependencies", params)
+        return _safe_parse_json(result_str)
+
+    async def rag_query(self, query: str, raw_data: Dict, context_sources: List[str] = None) -> Dict:
+        """Calls the rag_query tool on the MCP server."""
+        params = {
+            "query": query,
+            "raw_data": raw_data
+        }
+        if context_sources:
+            params["context_sources"] = context_sources
+        result_str = await self._call_mcp_tool("rag_query", params)
+        return _safe_parse_json(result_str)
+
+    async def generate_summary(self, data: Dict, summary_type: str = "comprehensive", include_sources: bool = True) -> Dict:
+        """Calls the generate_summary tool on the MCP server."""
+        params = {
+            "data": data,
+            "summary_type": summary_type,
+            "include_sources": include_sources
+        }
+        result_str = await self._call_mcp_tool("generate_summary", params)
+        return _safe_parse_json(result_str)
+
+    # --- Main Processing Logic ---
+
+    async def process_data_from_config(self, config: Dict, data_sources: List[Dict], raw_data: Dict) -> Dict:
         """
-        Processes data based on a configuration file by calling corresponding MCP tools.
+        Processes data based on a configuration file by calling corresponding MCP tools
+        using tool-specific methods.
         """
         if not self._session_initialized:
             raise RuntimeError("Client not initialized. Call initialize() first.")
 
-        logger.info("Starting simplified data processing from config.")
+        logger.info("Starting data processing from config with specific tool methods.")
         final_results = {}
+        processed_field_data = {}
 
         for group in config.get("groups", []):
             group_name = group.get("group_name")
@@ -760,26 +826,70 @@ class SimpleDataProcessingClient:
                 logger.info(f"Processing field: '{field_name}'")
                 
                 operation_results = []
+                previous_result = None
+
                 for operation in field_config.get("operation", []):
-                    op_type = operation.get("type", "").lower()
-                    tool_name = self.operation_to_tool_map.get(op_type)
-
-                    if not tool_name:
-                        logger.warning(f"No MCP tool mapping for operation type: '{op_type}' in field '{field_name}'")
+                    tool_name = operation.get("type")
+                    priority_list = field_config.get("priority", [])
+                    
+                    result = {}
+                    if tool_name == "fuzzy_match_sources":
+                        result = await self.fuzzy_match_sources(
+                            field_name=field_name,
+                            sources=data_sources,
+                            priority_list=priority_list,
+                            threshold=operation.get("threshold", 0.8),
+                            target_value=operation.get("target_value", "")
+                        )
+                    elif tool_name == "identify_comprehensive_values":
+                        result = await self.identify_comprehensive_values(
+                            field_name=field_name,
+                            sources=data_sources,
+                            priority_list=priority_list
+                        )
+                    elif tool_name == "enrich_data_llm":
+                        result = await self.enrich_data_llm(
+                            field_name=field_name,
+                            sources=data_sources,
+                            priority_list=priority_list,
+                            enrichment_prompt=operation.get("enrichment_prompt", ""),
+                            context=operation.get("context", {})
+                        )
+                    elif tool_name == "select_best_match":
+                        matches = previous_result.get("matches", []) if previous_result else []
+                        result = await self.select_best_match(matches=matches, priority_list=priority_list)
+                    elif tool_name == "process_with_priority":
+                        result = await self.process_with_priority(
+                            sources=data_sources,
+                            priority_list=priority_list,
+                            fields=operation.get("fields", [field_name])
+                        )
+                    elif tool_name == "set_field_dependencies":
+                        result = await self.set_field_dependencies(
+                            field_name=field_name,
+                            dependencies=operation.get("dependencies", [])
+                        )
+                    elif tool_name == "rag_query":
+                        result = await self.rag_query(
+                            query=operation.get("query", f"Find information about {field_name}"),
+                            raw_data=raw_data,
+                            context_sources=priority_list
+                        )
+                    elif tool_name == "generate_summary":
+                        result = await self.generate_summary(
+                            data=processed_field_data,
+                            summary_type=operation.get("summary_type", "comprehensive"),
+                            include_sources=operation.get("include_sources", True)
+                        )
+                    else:
+                        logger.warning(f"No specific method for tool '{tool_name}' in field '{field_name}'. Skipping.")
                         continue
-
-                    params = self._prepare_tool_params(tool_name, field_name, data_sources, operation, field_config)
                     
-                    result_str = await self.call_mcp_tool(tool_name, params)
-                    parsed_result = _safe_parse_json(result_str)
-                    
-                    operation_results.append({
-                        "operation": op_type,
-                        "tool_name": tool_name,
-                        "result": parsed_result
-                    })
-
+                    operation_results.append({"operation": tool_name, "result": result})
+                    previous_result = result
+                
                 final_results[group_name][field_name] = operation_results
+                processed_field_data[field_name] = operation_results
                 logger.info(f"Finished processing for field '{field_name}'.")
 
         return final_results
@@ -822,9 +932,12 @@ async def main(config: Dict, extracted_data: List[Dict]):
 
             logger.info(f"Processing {len(data_sources)} data sources with simplified config-driven processing.")
             
+            raw_data = {"extracted": extracted_data, "config": config}
+
             result = await client.process_data_from_config(
                 config=config,
-                data_sources=data_sources
+                data_sources=data_sources,
+                raw_data=raw_data
             )
             
             logger.info("--- SIMPLIFIED PROCESSING COMPLETED ---")
