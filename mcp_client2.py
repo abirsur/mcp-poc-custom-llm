@@ -1,386 +1,351 @@
 #!/usr/bin/env python3
 """
-MCP Client with ReActChain for Data Post-Processing
-Integrates with Azure OpenAI GPT-4o for intelligent data processing
+MCP Client with LangChain ReAct Agent for Data Post-Processing
+Integrates with Azure OpenAI GPT-4o and uses LangChain's ReAct implementation
 """
 
 import asyncio
 import json
 import logging
-import sys
-from typing import Any, Dict, List, Optional, Tuple
-from dataclasses import dataclass
-import re
-from datetime import datetime
-
-# Azure OpenAI imports
-from openai import AsyncAzureOpenAI
+from typing import Any, Dict, List, Optional, Type
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# Azure OpenAI imports
+from openai import AsyncAzureOpenAI
 
 # MCP client imports
 from mcp import ClientSession, HttpPostTransport, ServerId
 from mcp.client.http import http_client
 
+# LangChain imports
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain.tools import BaseTool
+from langchain_core.prompts import PromptTemplate
+from langchain_core.language_models.llms import BaseLLM
+from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+from pydantic import BaseModel, Field
+
+load_dotenv()
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-@dataclass
-class ReActStep:
-    """Represents a step in ReAct reasoning chain"""
-    thought: str
-    action: str
-    action_input: Dict[str, Any]
-    observation: str
-    step_number: int
 
-class ReActChain:
-    """
-    ReAct (Reasoning and Acting) Chain for data processing pipeline
-    """
+def _parse_mcp_result(result: Any, default_message: str) -> str:
+    """Helper function to parse MCP tool call results."""
+    if result and result.content:
+        # Filter for content objects that have a 'text' attribute and join them
+        texts = [content.text for content in result.content if hasattr(content, 'text') and content.text]
+        if texts:
+            return "\n".join(texts)
+    return default_message
+
+
+class AzureOpenAILLM(BaseLLM):
+    """LangChain LLM wrapper for Azure OpenAI"""
     
-    def __init__(self, azure_client: AsyncAzureOpenAI, mcp_session: ClientSession):
-        self.azure_client = azure_client
-        self.mcp_session = mcp_session
-        self.steps: List[ReActStep] = []
-        self.available_tools = []
-        
-    async def initialize(self):
-        """Initialize the chain by fetching available tools"""
+    azure_client: Any = None
+    model_name: str = "gpt-4o"
+    temperature: float = 0.1
+    max_tokens: int = 2000
+    
+    def __init__(self, azure_config: Dict[str, str], **kwargs):
+        super().__init__(**kwargs)
+        self.azure_client = AsyncAzureOpenAI(
+            api_key=azure_config["api_key"],
+            api_version=azure_config["api_version"],
+            azure_endpoint=azure_config["endpoint"]
+        )
+        self.model_name = os.getenv("AZURE_OPENAI_GPT4O_DEPLOYMENT_NAME", "gpt-4o")
+    
+    @property
+    def _llm_type(self) -> str:
+        return "azure_openai"
+    
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Call Azure OpenAI API synchronously"""
+        # For synchronous calls, we need to run the async method
+        return asyncio.run(self._acall(prompt, stop, run_manager, **kwargs))
+    
+    async def _acall(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Call Azure OpenAI API asynchronously"""
         try:
-            tools_response = await self.mcp_session.list_tools()
-            self.available_tools = tools_response.tools
-            logger.info(f"Initialized with {len(self.available_tools)} tools")
+            response = await self.azure_client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                stop=stop,
+                **kwargs
+            )
+            return response.choices[0].message.content
         except Exception as e:
-            logger.error(f"Failed to initialize ReActChain: {e}")
-            raise
-    
-    def create_system_prompt(self) -> str:
-        """Create system prompt for ReAct reasoning with detailed tool schemas"""
-        tools_description = []
-        for tool in self.available_tools:
-            schema = tool.inputSchema
-            required_fields = schema.get('required', [])
-            properties = schema.get('properties', {})
-            
-            tool_desc = f"- {tool.name}: {tool.description}\n"
-            tool_desc += f"  Required parameters: {required_fields}\n"
-            tool_desc += "  Parameters:\n"
-            
-            for prop, details in properties.items():
-                prop_type = details.get('type', 'unknown')
-                default_val = details.get('default', 'N/A')
-                tool_desc += f"    - {prop} ({prop_type}): {details.get('description', 'No description')}"
-                if default_val != 'N/A':
-                    tool_desc += f" [default: {default_val}]"
-                tool_desc += "\n"
-            
-            tools_description.append(tool_desc)
-        
-        tools_text = "\n".join(tools_description)
-        
-        return f"""You are an expert data processing agent using ReAct (Reasoning and Acting) methodology.
-
-Available Tools:
-{tools_text}
-
-Your task is to process data from multiple sources using a structured approach:
-
-1. FUZZY MATCHING: Match data across sources
-2. COMPREHENSIVE VALUE IDENTIFICATION: Find the most complete values
-3. LLM ENRICHMENT: Enhance data using language models
-4. PRIORITY PROCESSING: Handle data based on priority lists
-5. DEPENDENCY MANAGEMENT: Handle field dependencies
-6. RAG OPERATIONS: Use retrieval-augmented generation when needed
-
-Use this ReAct format:
-
-Thought: [Your reasoning about what to do next]
-Action: [The tool to use]
-Action Input: [JSON object with ALL required parameters for the tool]
-Observation: [The result from the tool]
-
-Continue this process until you have a final answer.
-
-CRITICAL REQUIREMENTS:
-- ALWAYS provide ALL required parameters for each tool as specified in the tool schema
-- Use proper JSON format for Action Input
-- For tools requiring "sources" parameter, convert data_sources to the proper format
-- For tools requiring "field_name", specify which field you're processing
-- Always track data sources throughout the process
-- Handle dependencies by processing prerequisite fields first
-- Use priority lists to select the best data when multiple sources are available
-- For complex queries, use RAG operations with raw data context
-
-Begin by analyzing the user's request and planning your approach."""
-
-    async def execute(self, 
-                     user_prompt: str, 
-                     data_sources: List[Dict], 
-                     raw_data: Dict = None,
-                     priority_list: List[str] = None,
-                     max_iterations: int = 10) -> Dict[str, Any]:
-        """
-        Execute the ReAct chain for data processing
-        """
-        # Prepare the initial context
-        context = {
-            "user_request": user_prompt,
-            "data_sources": data_sources,
-            "raw_data": raw_data or {},
-            "priority_list": priority_list or [],
-            "processing_history": []
-        }
-        
-        # Create the initial conversation
-        messages = [
-            {"role": "system", "content": self.create_system_prompt()},
-            {"role": "user", "content": self._create_user_message(context)}
-        ]
-        
-        final_result = {}
-        
-        for iteration in range(max_iterations):
-            try:
-                # Get LLM response
-                response = await self.azure_client.chat.completions.create(
-                    model=os.getenv("AZURE_OPENAI_GPT4O_DEPLOYMENT_NAME"),
-                    messages=messages,
-                    temperature=0.1,
-                    max_tokens=2000
-                )
-                
-                assistant_message = response.choices[0].message.content
-                messages.append({"role": "assistant", "content": assistant_message})
-                
-                # Parse ReAct format
-                thought, action, action_input = self._parse_react_response(assistant_message)
-                
-                if not action:
-                    # No action means we're done
-                    final_result = self._extract_final_answer(assistant_message)
-                    break
-                
-                # Validate and fix action input based on tool schema
-                validated_input = self._validate_and_fix_action_input(action, action_input, context)
-                
-                # Execute the action
-                observation = await self._execute_action(action, validated_input)
-                
-                # Record the step
-                step = ReActStep(
-                    thought=thought,
-                    action=action,
-                    action_input=validated_input,
-                    observation=observation,
-                    step_number=iteration + 1
-                )
-                self.steps.append(step)
-                
-                # Add observation to conversation
-                observation_message = f"Observation: {observation}"
-                messages.append({"role": "user", "content": observation_message})
-                
-                # Check if we have a final answer
-                if "Final Answer:" in assistant_message:
-                    final_result = self._extract_final_answer(assistant_message)
-                    break
-                    
-            except Exception as e:
-                logger.error(f"Error in iteration {iteration + 1}: {e}")
-                final_result = {"error": str(e), "completed_steps": len(self.steps)}
-                break
-        
-        return {
-            "final_result": final_result,
-            "steps": [self._step_to_dict(step) for step in self.steps],
-            "total_iterations": len(self.steps),
-            "context": context
-        }
-    
-    def _create_user_message(self, context: Dict) -> str:
-        """Create the initial user message with context"""
-        return f"""
-User Request: {context['user_request']}
-
-Data Sources ({len(context['data_sources'])} sources):
-{json.dumps(context['data_sources'], indent=2)}
-
-Priority List: {context['priority_list']}
-
-Raw Data Available: {'Yes' if context['raw_data'] else 'No'}
-
-Please process this data according to the requirements. Start by analyzing the request and determining the best approach.
-
-IMPORTANT: When using tools, ensure you provide ALL required parameters as specified in the tool schemas.
-"""
-    
-    def _parse_react_response(self, response: str) -> Tuple[str, str, Dict]:
-        """Parse ReAct format response"""
-        thought_match = re.search(r"Thought:\s*(.*?)(?=\n(?:Action|Final Answer):|$)", response, re.DOTALL)
-        action_match = re.search(r"Action:\s*(.*?)(?=\n|$)", response)
-        action_input_match = re.search(r"Action Input:\s*(.*?)(?=\n(?:Observation|Thought|Action|Final Answer):|$)", response, re.DOTALL)
-        
-        thought = thought_match.group(1).strip() if thought_match else ""
-        action = action_match.group(1).strip() if action_match else ""
-        
-        action_input = {}
-        if action_input_match:
-            try:
-                action_input_str = action_input_match.group(1).strip()
-                # Try to parse as JSON
-                action_input = json.loads(action_input_str)
-            except json.JSONDecodeError:
-                # If not JSON, treat as string and try to structure it
-                action_input = {"query": action_input_str}
-        
-        return thought, action, action_input
-    
-    def _validate_and_fix_action_input(self, action: str, action_input: Dict, context: Dict) -> Dict:
-        """Validate and fix action input based on tool schema"""
-        # Find the tool schema
-        tool_schema = None
-        for tool in self.available_tools:
-            if tool.name == action:
-                tool_schema = tool.inputSchema
-                break
-        
-        if not tool_schema:
-            logger.warning(f"No schema found for tool: {action}")
-            return action_input
-        
-        required_fields = tool_schema.get('required', [])
-        properties = tool_schema.get('properties', {})
-        validated_input = action_input.copy()
-        
-        # Check and provide missing required fields
-        for field in required_fields:
-            if field not in validated_input or validated_input[field] is None:
-                # Try to infer the missing field
-                if field == "sources":
-                    validated_input["sources"] = context["data_sources"]
-                elif field == "field_name":
-                    # Try to extract field name from the context or action input
-                    if "field" in action_input:
-                        validated_input["field_name"] = action_input["field"]
-                    elif "fields" in action_input and isinstance(action_input["fields"], list) and action_input["fields"]:
-                        validated_input["field_name"] = action_input["fields"][0]
-                    else:
-                        # Default to a common field name
-                        validated_input["field_name"] = "client_name"
-                elif field == "target_value":
-                    validated_input["target_value"] = ""  # Empty string for auto-detection
-                elif field == "matches":
-                    validated_input["matches"] = []
-                elif field == "priority_list":
-                    validated_input["priority_list"] = context.get("priority_list", [])
-                elif field == "fields":
-                    # Extract fields from config or use common fields
-                    config = context.get("raw_data", {}).get("config", {})
-                    if config and "fields" in config:
-                        validated_input["fields"] = list(config["fields"].keys())
-                    else:
-                        validated_input["fields"] = ["client_name", "policy_number", "claim_amount"]
-                elif field == "data":
-                    validated_input["data"] = context["data_sources"]
-                elif field == "enrichment_prompt":
-                    validated_input["enrichment_prompt"] = "Please enrich this data with additional context and details."
-                elif field == "query":
-                    validated_input["query"] = action_input.get("query", "Process and analyze the provided data")
-                elif field == "raw_data":
-                    validated_input["raw_data"] = context.get("raw_data", {})
-                elif field == "field_name" and action == "set_field_dependencies":
-                    validated_input["field_name"] = action_input.get("field_name", "client_name")
-                elif field == "dependencies":
-                    validated_input["dependencies"] = action_input.get("dependencies", [])
-                else:
-                    logger.warning(f"Could not infer value for required field '{field}' in tool '{action}'")
-                    # Set a default value based on the property type
-                    prop_type = properties.get(field, {}).get('type', 'string')
-                    if prop_type == 'string':
-                        validated_input[field] = ""
-                    elif prop_type == 'array':
-                        validated_input[field] = []
-                    elif prop_type == 'object':
-                        validated_input[field] = {}
-                    elif prop_type == 'number':
-                        validated_input[field] = 0
-                    elif prop_type == 'boolean':
-                        validated_input[field] = False
-        
-        # Apply default values for optional fields
-        for field, prop_details in properties.items():
-            if field not in validated_input and 'default' in prop_details:
-                validated_input[field] = prop_details['default']
-        
-        logger.info(f"Validated input for {action}: {validated_input}")
-        return validated_input
-    
-    async def _execute_action(self, action: str, action_input: Dict) -> str:
-        """Execute an action using MCP tools"""
-        try:
-            result = await self.mcp_session.call_tool(action, action_input)
-            
-            # Extract text content from result
-            if result.content:
-                observations = []
-                for content in result.content:
-                    if hasattr(content, 'text'):
-                        observations.append(content.text)
-                return "\n".join(observations)
-            
-            return "No result returned from tool"
-            
-        except Exception as e:
-            logger.error(f"Error executing action {action} with input {action_input}: {e}")
+            logger.error(f"Error calling Azure OpenAI: {e}")
             return f"Error: {str(e)}"
+
+# Custom LangChain Tools for MCP Server Integration
+
+class FuzzyMatchTool(BaseTool):
+    """Tool for fuzzy matching across data sources"""
+    name: str = "fuzzy_match_sources"
+    description: str = "Perform fuzzy matching across multiple data sources for a specific field"
+    mcp_session: Any = None
     
-    def _extract_final_answer(self, response: str) -> Dict:
-        """Extract final answer from response"""
-        final_answer_match = re.search(r"Final Answer:\s*(.*?)$", response, re.DOTALL)
-        
-        if final_answer_match:
-            answer_text = final_answer_match.group(1).strip()
-            try:
-                # Try to parse as JSON
-                return json.loads(answer_text)
-            except json.JSONDecodeError:
-                return {"answer": answer_text}
-        
-        return {"answer": "Processing completed", "status": "success"}
+    class ArgsSchema(BaseModel):
+        target_value: str = Field(description="Target value to match against (can be empty for auto-detection)")
+        field_name: str = Field(description="Name of the field to match")
+        threshold: float = Field(default=0.8, description="Similarity threshold (0.0-1.0)")
+        sources: List[Dict] = Field(description="List of data sources to search")
     
-    def _step_to_dict(self, step: ReActStep) -> Dict:
-        """Convert ReActStep to dictionary"""
-        return {
-            "step_number": step.step_number,
-            "thought": step.thought,
-            "action": step.action,
-            "action_input": step.action_input,
-            "observation": step.observation
-        }
+    args_schema: Type[BaseModel] = ArgsSchema
+    
+    def _run(self, target_value: str, field_name: str, threshold: float = 0.8, sources: List[Dict] = None, **kwargs) -> str:
+        """Run the fuzzy match tool"""
+        return asyncio.run(self._arun(target_value, field_name, threshold, sources, **kwargs))
+    
+    async def _arun(self, target_value: str, field_name: str, threshold: float = 0.8, sources: List[Dict] = None, **kwargs) -> str:
+        """Run the fuzzy match tool asynchronously"""
+        try:
+            result = await self.mcp_session.call_tool("fuzzy_match_sources", {
+                "target_value": target_value,
+                "field_name": field_name,
+                "threshold": threshold,
+                "sources": sources or []
+            })
+            
+            return _parse_mcp_result(result, "No matches found")
+        except Exception as e:
+            logger.error(f"Error in fuzzy matching tool: {e}", exc_info=True)
+            return f"Error in fuzzy matching: {str(e)}"
+
+class SelectBestMatchTool(BaseTool):
+    """Tool for selecting the best match from fuzzy match results"""
+    name: str = "select_best_match"
+    description: str = "Select the best matching value based on similarity and priority"
+    mcp_session: Any = None
+    
+    class ArgsSchema(BaseModel):
+        matches: List[Dict] = Field(description="List of matches from fuzzy matching")
+        priority_list: Optional[List[str]] = Field(default=None, description="Priority list for source ranking")
+    
+    args_schema: Type[BaseModel] = ArgsSchema
+    
+    def _run(self, matches: List[Dict], priority_list: Optional[List[str]] = None, **kwargs) -> str:
+        return asyncio.run(self._arun(matches, priority_list, **kwargs))
+    
+    async def _arun(self, matches: List[Dict], priority_list: Optional[List[str]] = None, **kwargs) -> str:
+        try:
+            result = await self.mcp_session.call_tool("select_best_match", {
+                "matches": matches,
+                "priority_list": priority_list or []
+            })
+            
+            return _parse_mcp_result(result, "No best match selected")
+        except Exception as e:
+            logger.error(f"Error in select best match tool: {e}", exc_info=True)
+            return f"Error in selecting best match: {str(e)}"
+
+class ComprehensiveValuesTool(BaseTool):
+    """Tool for identifying comprehensive values"""
+    name: str = "identify_comprehensive_values"
+    description: str = "Identify comprehensive values with source tracking for a specific field"
+    mcp_session: Any = None
+    
+    class ArgsSchema(BaseModel):
+        sources: List[Dict] = Field(description="List of data sources")
+        field_name: str = Field(description="Name of the field to analyze")
+    
+    args_schema: Type[BaseModel] = ArgsSchema
+    
+    def _run(self, sources: List[Dict], field_name: str, **kwargs) -> str:
+        return asyncio.run(self._arun(sources, field_name, **kwargs))
+    
+    async def _arun(self, sources: List[Dict], field_name: str, **kwargs) -> str:
+        try:
+            result = await self.mcp_session.call_tool("identify_comprehensive_values", {
+                "sources": sources,
+                "field_name": field_name
+            })
+            
+            return _parse_mcp_result(result, "No comprehensive values found")
+        except Exception as e:
+            logger.error(f"Error in comprehensive values tool: {e}", exc_info=True)
+            return f"Error in identifying comprehensive values: {str(e)}"
+
+class EnrichDataTool(BaseTool):
+    """Tool for enriching data using LLM"""
+    name: str = "enrich_data_llm"
+    description: str = "Enrich data using LLM with source preservation"
+    mcp_session: Any = None
+    
+    class ArgsSchema(BaseModel):
+        data: Dict = Field(description="Data to enrich")
+        enrichment_prompt: str = Field(description="Prompt for enrichment")
+        context: Optional[str] = Field(default="", description="Additional context")
+    
+    args_schema: Type[BaseModel] = ArgsSchema
+    
+    def _run(self, data: Dict, enrichment_prompt: str, context: str = "", **kwargs) -> str:
+        return asyncio.run(self._arun(data, enrichment_prompt, context, **kwargs))
+    
+    async def _arun(self, data: Dict, enrichment_prompt: str, context: str = "", **kwargs) -> str:
+        try:
+            result = await self.mcp_session.call_tool("enrich_data_llm", {
+                "data": data,
+                "enrichment_prompt": enrichment_prompt,
+                "context": context
+            })
+            
+            return _parse_mcp_result(result, "No enrichment performed")
+        except Exception as e:
+            logger.error(f"Error in data enrichment tool: {e}", exc_info=True)
+            return f"Error in data enrichment: {str(e)}"
+
+class ProcessWithPriorityTool(BaseTool):
+    """Tool for processing data with priority"""
+    name: str = "process_with_priority"
+    description: str = "Process data according to priority list"
+    mcp_session: Any = None
+    
+    class ArgsSchema(BaseModel):
+        sources: List[Dict] = Field(description="List of data sources")
+        priority_list: List[str] = Field(description="Priority list for source ranking")
+        fields: List[str] = Field(description="List of fields to process")
+    
+    args_schema: Type[BaseModel] = ArgsSchema
+    
+    def _run(self, sources: List[Dict], priority_list: List[str], fields: List[str], **kwargs) -> str:
+        return asyncio.run(self._arun(sources, priority_list, fields, **kwargs))
+    
+    async def _arun(self, sources: List[Dict], priority_list: List[str], fields: List[str], **kwargs) -> str:
+        try:
+            result = await self.mcp_session.call_tool("process_with_priority", {
+                "sources": sources,
+                "priority_list": priority_list,
+                "fields": fields
+            })
+            
+            return _parse_mcp_result(result, "No priority processing results")
+        except Exception as e:
+            logger.error(f"Error in priority processing tool: {e}", exc_info=True)
+            return f"Error in priority processing: {str(e)}"
+
+class SetDependenciesTool(BaseTool):
+    """Tool for setting field dependencies"""
+    name: str = "set_field_dependencies"
+    description: str = "Set dependencies between fields"
+    mcp_session: Any = None
+    
+    class ArgsSchema(BaseModel):
+        field_name: str = Field(description="Name of the field")
+        dependencies: List[str] = Field(description="List of dependency fields")
+    
+    args_schema: Type[BaseModel] = ArgsSchema
+    
+    def _run(self, field_name: str, dependencies: List[str], **kwargs) -> str:
+        return asyncio.run(self._arun(field_name, dependencies, **kwargs))
+    
+    async def _arun(self, field_name: str, dependencies: List[str], **kwargs) -> str:
+        try:
+            result = await self.mcp_session.call_tool("set_field_dependencies", {
+                "field_name": field_name,
+                "dependencies": dependencies
+            })
+            
+            return _parse_mcp_result(result, f"Dependencies set for {field_name}")
+        except Exception as e:
+            logger.error(f"Error in set dependencies tool: {e}", exc_info=True)
+            return f"Error in setting dependencies: {str(e)}"
+
+class RAGQueryTool(BaseTool):
+    """Tool for RAG-based queries"""
+    name: str = "rag_query"
+    description: str = "Perform RAG-based query for data enrichment"
+    mcp_session: Any = None
+    
+    class ArgsSchema(BaseModel):
+        query: str = Field(description="Query for RAG system")
+        raw_data: Dict = Field(description="Raw data for context")
+        context_sources: Optional[List[str]] = Field(default=None, description="Additional context sources")
+    
+    args_schema: Type[BaseModel] = ArgsSchema
+    
+    def _run(self, query: str, raw_data: Dict, context_sources: Optional[List[str]] = None, **kwargs) -> str:
+        return asyncio.run(self._arun(query, raw_data, context_sources, **kwargs))
+    
+    async def _arun(self, query: str, raw_data: Dict, context_sources: Optional[List[str]] = None, **kwargs) -> str:
+        try:
+            result = await self.mcp_session.call_tool("rag_query", {
+                "query": query,
+                "raw_data": raw_data,
+                "context_sources": context_sources or []
+            })
+            
+            return _parse_mcp_result(result, "No RAG results")
+        except Exception as e:
+            logger.error(f"Error in RAG query tool: {e}", exc_info=True)
+            return f"Error in RAG query: {str(e)}"
+
+class GenerateSummaryTool(BaseTool):
+    """Tool for generating summaries"""
+    name: str = "generate_summary"
+    description: str = "Generate comprehensive summary using RAG and LLM"
+    mcp_session: Any = None
+    
+    class ArgsSchema(BaseModel):
+        data: Dict = Field(description="Data to summarize")
+        summary_type: Optional[str] = Field(default="comprehensive", description="Type of summary")
+        include_sources: Optional[bool] = Field(default=True, description="Whether to include sources")
+    
+    args_schema: Type[BaseModel] = ArgsSchema
+    
+    def _run(self, data: Dict, summary_type: str = "comprehensive", include_sources: bool = True, **kwargs) -> str:
+        return asyncio.run(self._arun(data, summary_type, include_sources, **kwargs))
+    
+    async def _arun(self, data: Dict, summary_type: str = "comprehensive", include_sources: bool = True, **kwargs) -> str:
+        try:
+            result = await self.mcp_session.call_tool("generate_summary", {
+                "data": data,
+                "summary_type": summary_type,
+                "include_sources": include_sources
+            })
+            
+            return _parse_mcp_result(result, "No summary generated")
+        except Exception as e:
+            logger.error(f"Error in generate summary tool: {e}", exc_info=True)
+            return f"Error in generating summary: {str(e)}"
 
 class DataProcessingClient:
     """
-    Main client for data processing pipeline
+    Main client for data processing pipeline using LangChain ReAct
     """
     
     def __init__(self, azure_config: Dict[str, str]):
         self.azure_config = azure_config
-        self.azure_client = None
+        self.llm = None
         self.mcp_session = None
-        self.react_chain = None
+        self.tools = []
+        self.agent = None
+        self.agent_executor = None
     
     async def initialize(self, server_url: str = "http://127.0.0.1:8080"):
         """Initialize the client with Azure OpenAI and MCP server"""
-        # Initialize Azure OpenAI client
-        self.azure_client = AsyncAzureOpenAI(
-            api_key=self.azure_config["api_key"],
-            api_version=self.azure_config["api_version"],
-            azure_endpoint=self.azure_config["endpoint"]
-        )
+        # Initialize LLM
+        self.llm = AzureOpenAILLM(self.azure_config)
         
         # Initialize MCP session
         server_id = ServerId(
@@ -390,11 +355,63 @@ class DataProcessingClient:
         transport = HttpPostTransport(server_id)
         self.mcp_session = await http_client(transport).__aenter__()
         
-        # Initialize ReAct chain
-        self.react_chain = ReActChain(self.azure_client, self.mcp_session)
-        await self.react_chain.initialize()
+        # Initialize tools with MCP session
+        self.tools = [
+            FuzzyMatchTool(mcp_session=self.mcp_session),
+            SelectBestMatchTool(mcp_session=self.mcp_session),
+            ComprehensiveValuesTool(mcp_session=self.mcp_session),
+            EnrichDataTool(mcp_session=self.mcp_session),
+            ProcessWithPriorityTool(mcp_session=self.mcp_session),
+            SetDependenciesTool(mcp_session=self.mcp_session),
+            RAGQueryTool(mcp_session=self.mcp_session),
+            GenerateSummaryTool(mcp_session=self.mcp_session)
+        ]
         
-        logger.info("Data Processing Client initialized successfully")
+        # Create ReAct prompt template
+        react_prompt = PromptTemplate.from_template("""
+You are an expert data processing agent. You have access to tools that can help you process data from multiple sources.
+
+Your task is to process data using these operations:
+1. FUZZY MATCHING: Match data across sources
+2. COMPREHENSIVE VALUE IDENTIFICATION: Find the most complete values  
+3. LLM ENRICHMENT: Enhance data using language models
+4. PRIORITY PROCESSING: Handle data based on priority lists
+5. DEPENDENCY MANAGEMENT: Handle field dependencies
+6. RAG OPERATIONS: Use retrieval-augmented generation when needed
+
+TOOLS:
+{tools}
+
+Use the following format:
+
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+Begin!
+
+Question: {input}
+Thought: {agent_scratchpad}
+""")
+        
+        # Create ReAct agent
+        self.agent = create_react_agent(self.llm, self.tools, react_prompt)
+        
+        # Create agent executor
+        self.agent_executor = AgentExecutor(
+            agent=self.agent,
+            tools=self.tools,
+            verbose=True,
+            max_iterations=10,
+            handle_parsing_errors=True
+        )
+        
+        logger.info("Data Processing Client with LangChain ReAct initialized successfully")
     
     async def process_data(self, 
                           prompt: str,
@@ -403,25 +420,56 @@ class DataProcessingClient:
                           priority_list: List[str] = None,
                           processing_options: Dict = None) -> Dict:
         """
-        Main method to process data using ReAct chain
+        Main method to process data using LangChain ReAct agent
         """
-        if not self.react_chain:
+        if not self.agent_executor:
             raise RuntimeError("Client not initialized. Call initialize() first.")
         
-        processing_options = processing_options or {}
-        max_iterations = processing_options.get("max_iterations", 10)
+        # Prepare context for the agent
+        context_info = {
+            "data_sources": data_sources,
+            "raw_data": raw_data or {},
+            "priority_list": priority_list or [],
+            "processing_options": processing_options or {}
+        }
         
-        logger.info(f"Starting data processing with {len(data_sources)} sources")
+        # Create comprehensive input for the agent
+        agent_input = f"""
+{prompt}
+
+Available Data Sources ({len(data_sources)} sources):
+{json.dumps(data_sources, indent=2)}
+
+Priority List: {priority_list or []}
+
+Raw Data Available: {'Yes' if raw_data else 'No'}
+
+Context Information:
+{json.dumps(context_info, indent=2)}
+
+Please process this data according to the requirements and provide a comprehensive result.
+"""
         
-        result = await self.react_chain.execute(
-            user_prompt=prompt,
-            data_sources=data_sources,
-            raw_data=raw_data,
-            priority_list=priority_list,
-            max_iterations=max_iterations
-        )
+        logger.info("Starting data processing with LangChain ReAct agent")
         
-        return result
+        try:
+            # Run the agent
+            result = await self.agent_executor.ainvoke({"input": agent_input})
+            
+            return {
+                "final_result": result.get("output", {}),
+                "intermediate_steps": result.get("intermediate_steps", []),
+                "context": context_info,
+                "agent_type": "langchain_react"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in LangChain ReAct processing: {e}")
+            return {
+                "error": str(e),
+                "context": context_info,
+                "agent_type": "langchain_react"
+            }
     
     async def cleanup(self):
         """Cleanup resources"""
@@ -458,10 +506,10 @@ async def main(config: Dict, extracted_data: List[Dict]):
             data_sources.append({
                 "id": source["source_id"],
                 "name": source["doc_type"],
-                "priority": i + 1, # Default priority
+                "priority": i + 1,
                 "data": source["data"],
                 "timestamp": source.get("metadata", {}).get("timestamp", ""),
-                "confidence": 0.0  # Will be calculated during processing
+                "confidence": 0.0
             })
 
         # Create a comprehensive prompt for the ReAct agent
@@ -471,45 +519,40 @@ Process the data from the provided data sources to determine the best value for 
 Configuration:
 {json.dumps(config, indent=2)}
 
-Follow the operations and priorities defined in the configuration for each field.
-Handle any dependencies between fields. For example, process 'client_name' before 'policy_number'.
-Your final answer should be a single JSON object containing the processed data for all fields listed in the configuration.
-
-PROCESSING STEPS:
-1. First, set field dependencies as defined in the config
+PROCESSING REQUIREMENTS:
+1. Set field dependencies as defined in the config
 2. Use fuzzy matching to find similar values across sources
 3. Apply priority-based processing according to the priority list
 4. For each field, identify the most comprehensive value
 5. Use LLM enrichment when needed for data enhancement
-6. Generate a final consolidated result
+6. Handle any dependencies between fields (e.g., process 'client_name' before 'policy_number')
 
-Start by setting the dependencies for the fields as defined in the config.
+Your final answer should be a single JSON object containing the processed data for all fields listed in the configuration.
 """
 
-        logger.info("--- Starting Comprehensive Data Processing ---")
+        logger.info("--- Starting LangChain ReAct Data Processing ---")
         
         # Extract priority list from config if available
         priority_list = []
         if "global_settings" in config and "priority_list" in config["global_settings"]:
             priority_list = config["global_settings"]["priority_list"]
         
-        # Process data using the comprehensive prompt
+        # Process data using LangChain ReAct agent
         result = await client.process_data(
             prompt=prompt,
             data_sources=data_sources,
             priority_list=priority_list,
-            # Pass raw data if needed for RAG
             raw_data={"extracted": extracted_data, "config": config}
         )
         
-        final_processed_data = result.get('final_result', {})
-        
-        # Print the result
+        # Print results
         logger.info("\n--- FINAL PROCESSED DATA ---")
-        logger.info(json.dumps(final_processed_data, indent=2))
+        logger.info(json.dumps(result.get('final_result', {}), indent=2))
         
-        logger.info("\n--- ReAct Steps ---")
-        logger.info(json.dumps(result.get('steps', []), indent=2))
+        if 'intermediate_steps' in result:
+            logger.info("\n--- INTERMEDIATE STEPS ---")
+            for i, step in enumerate(result['intermediate_steps']):
+                logger.info(f"Step {i + 1}: {step}")
         
     except Exception as e:
         logger.error(f"An error occurred during processing: {e}", exc_info=True)
