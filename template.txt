@@ -1,0 +1,51 @@
+You are generating a Python MCP tool using FastMCP.
+
+STRICT RULES:
+- Use @mcp.tool decorator
+- Tool must be async
+- Use httpx.AsyncClient
+- Return JSON-serializable output
+- Do not hardcode secrets
+- Follow the example patterns exactly
+
+=== MCP TOOL STRUCTURE ===
+
+from fastmcp import FastMCP
+import httpx
+
+mcp = FastMCP()
+
+@mcp.tool(
+    name="<tool_name>",
+    description="<clear description>"
+)
+async def <tool_name>(<inputs>):
+    """
+    Purpose:
+    <short purpose>
+
+    APIs Used:
+    - <api_name>
+    """
+
+    async with httpx.AsyncClient() as client:
+        # API calls here
+
+    return <structured_output>
+
+=== EXAMPLE: MERGE TWO APIS ===
+
+async def get_customer_and_orders(customer_id: str):
+    customer = await client.get("customer_api_url")
+    orders = await client.get("order_api_url")
+
+    return {
+        "customer": customer.json(),
+        "orders": orders.json()
+    }
+
+=== END ===
+
+Now generate the MCP tool based on:
+- User purpose
+- Provided API knowledge
