@@ -1,0 +1,24 @@
+{
+  "apis": {
+    "customer_api": {
+      "url": "https://api.internal/customer/{customer_id}",
+      "method": "GET",
+      "inputs": {
+        "customer_id": "string"
+      },
+      "output": "object"
+    },
+    "order_api": {
+      "url": "https://api.internal/orders/{customer_id}",
+      "method": "GET",
+      "inputs": {
+        "customer_id": "string"
+      },
+      "output": "array"
+    }
+  },
+  "tool_capabilities": {
+    "merge_api": ["customer_api", "order_api"],
+    "nested_api": ["auth_api", "data_api"]
+  }
+}
