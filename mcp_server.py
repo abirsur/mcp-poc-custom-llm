@@ -14,6 +14,16 @@ MCP_PATH = os.getenv("MCP_PATH", "/mcp")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
+
+def _get_env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+STATELESS_HTTP = _get_env_bool("STATELESS_HTTP", False)
+
 service = FileZipBase64Service()
 
 mcp = FastMCP(
@@ -64,7 +74,7 @@ async def readyz(_: Request) -> JSONResponse:
             "server": SERVER_NAME,
             "transport": "streamable-http",
             "mcp_path": MCP_PATH,
-            "stateless_http": True,
+            "stateless_http": STATELESS_HTTP,
         }
     )
 
@@ -72,7 +82,7 @@ async def readyz(_: Request) -> JSONResponse:
 app = mcp.http_app(
     path=MCP_PATH,
     transport="streamable-http",
-    stateless_http=True,
+    stateless_http=STATELESS_HTTP,
 )
 
 
@@ -82,6 +92,6 @@ if __name__ == "__main__":
         host=HOST,
         port=PORT,
         path=MCP_PATH,
-        stateless_http=True,
+        stateless_http=STATELESS_HTTP,
         show_banner=False,
     )
