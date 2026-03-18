@@ -1,66 +1,95 @@
 from collections.abc import Sequence
+import json
 from typing import Any
 
-from mcp.client.session import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from langchain_mcp_adapters.client import MultiServerMCPClient
 
 
 class MCPClient:
-    def __init__(self, server_url: str) -> None:
+    def __init__(
+        self,
+        server_url: str,
+        *,
+        server_name: str = "default",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.server_url = server_url
+        self.server_name = server_name
+        self.headers = headers or {}
 
-    async def get_server_info(self) -> dict[str, str]:
-        async with streamable_http_client(self.server_url) as (read_stream, write_stream, _):
-            async with ClientSession(read_stream, write_stream) as session:
-                init_result = await session.initialize()
-                return {
-                    "name": init_result.serverInfo.name,
-                    "version": init_result.serverInfo.version,
-                }
+    def _build_client(self) -> MultiServerMCPClient:
+        config: dict[str, Any] = {
+            self.server_name: {
+                "transport": "streamable_http",
+                "url": self.server_url,
+            }
+        }
+        if self.headers:
+            config[self.server_name]["headers"] = self.headers
+        return MultiServerMCPClient(config)
+
+    async def _get_tools_map(self) -> dict[str, Any]:
+        client = self._build_client()
+        tools = await client.get_tools()
+        return {tool.name: tool for tool in tools}
+
+    def _normalize_result(self, result: Any) -> Any:
+        if isinstance(result, str):
+            try:
+                return json.loads(result)
+            except json.JSONDecodeError:
+                return result
+        return result
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        async with streamable_http_client(self.server_url) as (read_stream, write_stream, _):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                result = await session.list_tools()
-                return [
-                    {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "input_schema": tool.inputSchema,
-                    }
-                    for tool in result.tools
-                ]
+        tools_map = await self._get_tools_map()
+        tools_metadata: list[dict[str, Any]] = []
+        for tool in tools_map.values():
+            args_schema = getattr(tool, "args_schema", None)
+            input_schema = None
+            if args_schema is not None and hasattr(args_schema, "model_json_schema"):
+                input_schema = args_schema.model_json_schema()
+
+            tools_metadata.append(
+                {
+                    "name": tool.name,
+                    "description": getattr(tool, "description", None),
+                    "input_schema": input_schema,
+                }
+            )
+        return tools_metadata
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        async with streamable_http_client(self.server_url) as (read_stream, write_stream, _):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                result = await session.call_tool(tool_name, arguments or {})
-                return {
-                    "tool_name": tool_name,
-                    "arguments": arguments or {},
-                    "is_error": result.isError,
-                    "content": [item.model_dump(mode="json") for item in result.content],
-                    "structured_content": result.structuredContent,
-                }
+        tools_map = await self._get_tools_map()
+        tool = tools_map.get(tool_name)
+        if tool is None:
+            available_tools = ", ".join(sorted(tools_map))
+            raise ValueError(f"Tool '{tool_name}' not found. Available tools: {available_tools}")
+
+        result = self._normalize_result(await tool.ainvoke(arguments or {}))
+        return {
+            "tool_name": tool_name,
+            "arguments": arguments or {},
+            "result": result,
+        }
 
     async def call_tools(self, operations: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-        async with streamable_http_client(self.server_url) as (read_stream, write_stream, _):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                results: list[dict[str, Any]] = []
-                for operation in operations:
-                    tool_name = operation["tool_name"]
-                    arguments = operation.get("arguments", {})
-                    result = await session.call_tool(tool_name, arguments)
-                    results.append(
-                        {
-                            "tool_name": tool_name,
-                            "arguments": arguments,
-                            "is_error": result.isError,
-                            "content": [item.model_dump(mode="json") for item in result.content],
-                            "structured_content": result.structuredContent,
-                        }
-                    )
-                return results
+        tools_map = await self._get_tools_map()
+        results: list[dict[str, Any]] = []
+        for operation in operations:
+            tool_name = operation["tool_name"]
+            arguments = operation.get("arguments", {})
+            tool = tools_map.get(tool_name)
+            if tool is None:
+                available_tools = ", ".join(sorted(tools_map))
+                raise ValueError(f"Tool '{tool_name}' not found. Available tools: {available_tools}")
+
+            result = self._normalize_result(await tool.ainvoke(arguments))
+            results.append(
+                {
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                    "result": result,
+                }
+            )
+        return results
